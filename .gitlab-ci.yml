@@ -1,0 +1,14 @@
+include:
+  - project: 'general/ci-templates'
+    file: 'workflow.gitlab-ci.yml'
+  - project: 'general/ci-templates'
+    file: 'yarn.gitlab-ci.yml'
+  - project: 'fivem/avrp-deployment-client'
+    file: 'deployment.gitlab-ci.yml'
+
+variables:
+  SKIP_LINT: 'true'
+  SKIP_FILECHECKS: 'true'
+  SKIP_SECRET_CHECK: 'true'
+  STAGE_DEPLOYMENT_SPEC: spec.yaml
+  PROD_DEPLOYMENT_SPEC: spec.yaml

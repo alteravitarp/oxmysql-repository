@@ -1,0 +1,11 @@
+version: v1
+spec:
+  addon-name: oxmysql-repository
+  directory: avrp
+  post-commands:
+    pre-live:
+      - 'refresh'
+      - 'ensure {addon_name}'
+      - 'txaEvent "announcement" "{{\"author\":\"Deployment Service\",\"message\":\"Restarted {addon_name}\"}}"'
+
+  dependencies: []
