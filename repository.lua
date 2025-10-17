@@ -102,7 +102,7 @@ local function mapper(repo, data)
     for k, v in pairs(data) do
         for fieldName, encoder in pairs(repo.__mappers) do
             ---@cast encoder Encoder
-            v[fieldName] = encoder.decode(v[fieldName])
+            v[fieldName] = encoder.decode(fieldName, v[fieldName])
         end
     end
     return data
@@ -159,7 +159,7 @@ function baseRepository:import(objList)
         local values = {}
         local valueIndex = 1
         for _, v in pairs(self.__fields) do
-            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
+            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(v, obj[v]) or obj[v]
             valueIndex += 1
         end
         table.insert(transactions, { sql, values })
@@ -170,6 +170,33 @@ function baseRepository:import(objList)
     oxmysql:transaction_async(transactions)
 end
 
+---Patches a entity with the given data - can be used to only update certain fields on a entity to improve performance.
+---@param objOrId any should be the object or the ID of an entity
+---@param patch {[string]: any} patch data, key of table must be valid field names
+function baseRepository:updateFields(objOrId, patch)
+    local id = objOrId
+    if type(objOrId) == 'table' then id = objOrId[self.__id] end
+    if type(objOrId) ~= 'number' and type(objOrId) ~= 'string' then error(('id element cannot be of type %s'):format(type(objOrId))) end
+
+    local sets = {}
+    local values = {}
+    local valueIndex = 1
+
+    for _, fieldName in pairs(self.__fields) do
+        if patch[fieldName] then
+            sets[valueIndex] = ('`%s` = ?'):format(fieldName)
+            values[valueIndex] = patch[fieldName] ~= 'nil' and patch[fieldName] or nil
+            valueIndex += 1
+        end
+    end
+
+    values[valueIndex] = objOrId
+
+    local sql = ('UPDATE %s SET %s WHERE %s = ?'):format(self.__tableName, table.concat(sets, ', '), self.__id)
+    Logger.trace(('<patch(...)> Generated SQL: ^4%s^7.'):format(sql))
+    return oxmysql:update_async(sql, values)
+end
+
 function baseRepository:save(obj)
     if obj[self.__id] then
         local fieldList = {}
@@ -177,7 +204,7 @@ function baseRepository:save(obj)
         local valueIndex = 1
         for _, v in pairs(self.__fields) do
             table.insert(fieldList, ('%s = ?'):format(v))
-            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
+            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(v, obj[v]) or obj[v]
             if type(values[valueIndex]) == 'boolean' then values[valueIndex] = values[valueIndex] and 1 or 0 end -- mask boolean to 1/0
             valueIndex += 1
         end
@@ -196,11 +223,13 @@ function baseRepository:save(obj)
         local values = {}
         local valueIndex = 1
         for _, v in pairs(self.__fields) do
-            table.insert(fieldList, ('%s'):format(v))
-            table.insert(questionMarks, '?')
-            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
-            if type(values[valueIndex]) == 'boolean' then values[valueIndex] = values[valueIndex] and 1 or 0 end -- mask boolean to 1/0
-            valueIndex += 1
+            if (type(obj[v]) ~= 'nil') then -- we skip nil values so database defaults can hit
+                table.insert(fieldList, ('%s'):format(v))
+                table.insert(questionMarks, '?')
+                values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(v, obj[v]) or obj[v]
+                if type(values[valueIndex]) == 'boolean' then values[valueIndex] = values[valueIndex] and 1 or 0 end -- mask boolean to 1/0
+                valueIndex += 1
+            end
         end
 
         local sql = ('INSERT INTO %s (%s) VALUES(%s)'):format(self.__tableName, table.concat(fieldList, ', '), table.concat(questionMarks, ', '))
@@ -235,7 +264,7 @@ local repositoryMeta = {
 
                 for i, field in ipairs(fields) do
                     table.insert(conditions, ('%s = ?'):format(field))
-                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(field, values[i]) end
                 end
 
                 local whereClause = conditions[1]
@@ -256,6 +285,43 @@ local repositoryMeta = {
             end
         end
 
+        local setMatch, setByMatch = methodName:match('^set(.+)By(.+)$')
+        if setMatch and setByMatch then
+            local setFields, _, _ = parseFields(t.__fields, setMatch)
+            local setByFields, setByOperators, _ = parseFields(t.__fields, setByMatch)
+
+            return function(...)
+                local values = { ... }
+                local sets = { }
+                local conditions = {}
+                local valueIndex = 1
+
+                if values[1] == t then table.remove(values, 1) end
+
+                for _, field in ipairs(setFields) do
+                    table.insert(sets, ('`%s` = ?'):format(field))
+                    if t.__mappers[field] then values[valueIndex] = t.__mappers[field].encode(field, values[valueIndex]) end
+                    valueIndex += 1
+                end
+
+                for _, field in ipairs(setByFields) do
+                    table.insert(conditions, ('`%s` = ?'):format(field))
+                    if t.__mappers[field] then values[valueIndex] = t.__mappers[field].encode(field, values[valueIndex]) end
+                    valueIndex += 1
+                end
+    
+                local whereClause = conditions[1]
+                for i = 2, #conditions do
+                    whereClause = string.format("%s %s %s", whereClause, setByOperators[i - 1], conditions[i])
+                end
+                
+                local sql = string.format("UPDATE %s SET %s WHERE %s", t.__tableName, table.concat(sets, ', '), whereClause)
+                Logger.trace(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
+
+                return oxmysql:scalar_async(sql, values)
+            end
+        end
+
         local countByMatch = methodName:match('^countBy(.+)$')
         if countByMatch then
             local fields, operators, order = parseFields(t.__fields, countByMatch)
@@ -268,7 +334,7 @@ local repositoryMeta = {
 
                 for i, field in ipairs(fields) do
                     table.insert(conditions, ('%s = ?'):format(field))
-                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(field, values[i]) end
                 end
 
                 local whereClause = conditions[1]
@@ -300,7 +366,7 @@ local repositoryMeta = {
 
                 for i, field in ipairs(fields) do
                     table.insert(conditions, ('%s = ?'):format(field))
-                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(field, values[i]) end
                 end
 
                 local whereClause = conditions[1]

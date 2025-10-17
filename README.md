@@ -4,7 +4,24 @@ This module provides a [JPA-repository](https://docs.spring.io/spring-data/jpa/r
 
 ## Changelogs
 
-### 0.2.0 - countBy-Methods
+### 0.3.0 - set\*By\*-Methods
+
+You can now create shortcut-set methods so you can update a single (or multiple) fields without updating everything.
+
+Example:
+
+```lua
+---@class OwnedVehicleRepository : BaseRepository
+---@field setStoredAndStoredLocationByPlate fun(r: OwnedVehicleRepository, stored: boolean, storedLocation: string, plate: string): nil
+local repository = baseRepository.create('owned_vehicles_v2', 'id', {...})
+```
+
+Will generate:
+```sql
+UPDATE owned_vehicles_v2 SET `stored` = ?, `stored_location` = ? WHERE `plate` = ?
+```
+
+### 0.2.0 - countBy\*-Methods
 
 You can now get the count from your tables using `countBy{expression}(...)`.
 
@@ -13,6 +30,11 @@ Example:
 ---@class OwnedVehicleRepository : BaseRepository
 ---@field countByPlate fun(r: OwnedVehicleRepository, plate: string): number
 local repository = baseRepository.create('owned_vehicles_v2', 'id', {...})
+```
+
+Will generate:
+```sql
+SELECT COUNT(*) as count FROM owned_vehicles_v2 WHERE plate = ?
 ```
 
 ## Requirements
@@ -102,3 +124,4 @@ return repository
 - [x] Only select fields set in `baseRepository.create(...)`
 - [ ] Only update modified fields
 - [x] Added `countBy` dynamic methods
+- [x] Added `set{}By{}` dynamic methods
