@@ -1,24 +1,18 @@
+---@alias EncoderFunction fun(fn: string, val: any): any
+---@alias Encoder {encode: EncoderFunction, decode: EncoderFunction}
 ---@class BaseRepository
 ---@field __id string Table PRIMARY KEY identifier (mostly just `id`)
 ---@field __tableName string Name of the actual database table
 ---@field __fields {[number]: string} Ordered list of field names for the table
----@field __jsonFields {[string]: boolean} If a field is set as json; it will be decoded/encoded automatically
 ---@field __pendingUpdateStatements {[number]: {saveAt: number, object: any}}
+---@field __mappers {[string]: Encoder}
+---@field query_async fun(query, params): any[]
+---@field scalar_async fun(query, params): any
+---@field update_async fun(query, params): number
+---@field insert_async fun(query, params): number
 local baseRepository = {}
 
-local oxmysql = require('oxmysql')
-
-baseRepository.oxmysql = oxmysql
-
-local function isDebugEnabled()
-    return GetConvar('oxmysql:repository:debug', 'false') == 'true'
-end
-
-local function debugMessage(msg)
-    if isDebugEnabled() then
-        print(msg)
-    end
-end
+local oxmysql = require('server.module.db')
 
 -- Hilfsfunktion: CamelCase zu snake_case konvertieren
 local function camelToSnake(str)
@@ -106,26 +100,29 @@ end
 local function mapper(repo, data)
     if data == nil then return {} end
     for k, v in pairs(data) do
-        for fieldName, _ in pairs(repo.__jsonFields) do
-            v[fieldName] = json.decode(v[fieldName])
+        for fieldName, encoder in pairs(repo.__mappers) do
+            ---@cast encoder Encoder
+            v[fieldName] = encoder.decode(v[fieldName])
         end
     end
     return data
 end
 
 function baseRepository:findAll()
-    debugMessage(('<findAll()> Generated SQL: ^4%s^7.'):format(('SELECT * FROM %s'):format(self.__tableName)))
-    return mapper(self, oxmysql:query_async(('SELECT * FROM %s'):format(self.__tableName)))
+    local selectFields = lib.array.map(lib.array.merge(self.__fields, {self.__id}), function (element) return ('`%s`'):format(element) end)
+    local sql = ('SELECT %s FROM %s'):format(table.concat(selectFields, ', '), self.__tableName)
+    Logger.trace(('<findAll()> Generated SQL: ^4%s^7.'):format(sql))
+    return mapper(self, oxmysql:query_async(sql))
 end
 
 function baseRepository:count()
-    debugMessage(('<count()> Generated SQL: ^4%s^7.'):format(('SELECT COUNT(*) as count FROM %s'):format(self.__tableName)))
+    Logger.trace(('<count()> Generated SQL: ^4%s^7.'):format(('SELECT COUNT(*) as count FROM %s'):format(self.__tableName)))
     return oxmysql:scalar_async(('SELECT COUNT(*) as count FROM %s'):format(self.__tableName))
 end
 
 ---@return boolean true if the table is empty
 function baseRepository:isEmpty()
-    debugMessage(('<isEmpty()> Generated SQL: ^4%s^7.'):format(('SELECT COUNT(*) as count FROM %s LIMIT 1'):format(self
+    Logger.trace(('<isEmpty()> Generated SQL: ^4%s^7.'):format(('SELECT COUNT(*) as count FROM %s LIMIT 1'):format(self
         .__tableName)))
     local c = oxmysql:scalar_async(('SELECT COUNT(*) as count FROM %s LIMIT 1'):format(self.__tableName))
     return c == 0
@@ -134,13 +131,13 @@ end
 function baseRepository:delete(obj)
     if not obj[self.__id] then return end
     local sql = ('DELETE FROM %s WHERE %s = ?'):format(self.__tableName, self.__id)
-    debugMessage(('<delete()> Generated SQL: ^4%s^7.'):format(sql))
+    Logger.trace(('<delete()> Generated SQL: ^4%s^7.'):format(sql))
     oxmysql:update_async(sql, { obj[self.__id] })
 end
 
 function baseRepository:deleteAll()
     local sql = ('DELETE FROM %s'):format(self.__tableName)
-    debugMessage(('<deleteAll()> Generated SQL: ^4%s^7.'):format(sql))
+    Logger.trace(('<deleteAll()> Generated SQL: ^4%s^7.'):format(sql))
     oxmysql:update_async(sql)
 end
 
@@ -162,13 +159,13 @@ function baseRepository:import(objList)
         local values = {}
         local valueIndex = 1
         for _, v in pairs(self.__fields) do
-            values[valueIndex] = self.__jsonFields[v] and json.encode(obj[v] or '{}') or obj[v]
+            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
             valueIndex += 1
         end
         table.insert(transactions, { sql, values })
     end
 
-    debugMessage(('<import(...)> Generated SQL: ^4%s^7. (transactional insert - will insert %s rows.)'):format(sql, #objList))
+    Logger.trace(('<import(...)> Generated SQL: ^4%s^7. (transactional insert - will insert %s rows.)'):format(sql, #objList))
 
     oxmysql:transaction_async(transactions)
 end
@@ -180,7 +177,7 @@ function baseRepository:save(obj)
         local valueIndex = 1
         for _, v in pairs(self.__fields) do
             table.insert(fieldList, ('%s = ?'):format(v))
-            values[valueIndex] = self.__jsonFields[v] and json.encode(obj[v] or '{}') or obj[v]
+            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
             if type(values[valueIndex]) == 'boolean' then values[valueIndex] = values[valueIndex] and 1 or 0 end -- mask boolean to 1/0
             valueIndex += 1
         end
@@ -188,7 +185,7 @@ function baseRepository:save(obj)
         self.__pendingUpdateStatements[obj[self.__id]] = nil
 
         local sql = ('UPDATE %s SET %s WHERE %s = ?'):format(self.__tableName, table.concat(fieldList, ', '), self.__id)
-        debugMessage(('<save(...)> Generated SQL: ^4%s^7.'):format(sql))
+        Logger.trace(('<save(...)> Generated SQL: ^4%s^7.'):format(sql))
         values[valueIndex] = obj[self.__id]
         local affectedRows = oxmysql:update_async(sql, values)
         if affectedRows == 0 then error('Update did not change anything. Is the SQL statement correct?') end
@@ -201,13 +198,13 @@ function baseRepository:save(obj)
         for _, v in pairs(self.__fields) do
             table.insert(fieldList, ('%s'):format(v))
             table.insert(questionMarks, '?')
-            values[valueIndex] = self.__jsonFields[v] and json.encode(obj[v] or '{}') or obj[v]
+            values[valueIndex] = self.__mappers[v] and self.__mappers[v].encode(obj[v]) or obj[v]
             if type(values[valueIndex]) == 'boolean' then values[valueIndex] = values[valueIndex] and 1 or 0 end -- mask boolean to 1/0
             valueIndex += 1
         end
 
         local sql = ('INSERT INTO %s (%s) VALUES(%s)'):format(self.__tableName, table.concat(fieldList, ', '), table.concat(questionMarks, ', '))
-        debugMessage(('<save(...)> Generated SQL: ^4%s^7.'):format(sql))
+        Logger.trace(('<save(...)> Generated SQL: ^4%s^7.'):format(sql))
 
         local id = oxmysql:insert_async(sql, values)
         obj[self.__id] = id
@@ -217,8 +214,12 @@ end
 
 local repositoryMeta = {
     __index = function(t, methodName)
+        ---@cast t BaseRepository
         if type(baseRepository[methodName]) == 'function' then
             return baseRepository[methodName]
+        end
+        if methodName == 'query_async' or methodName == 'update_async' or methodName == 'scalar_async' or methodName == 'insert_async' then
+            return oxmysql[methodName]
         end
 
         local singleMatch = methodName:match('^findBy(.+)$')
@@ -228,12 +229,13 @@ local repositoryMeta = {
             return function(...)
                 local values = { ... }
                 local conditions = {}
+                local selectFields = lib.array.map(lib.array.merge(t.__fields, {t.__id}), function (element) return ('`%s`'):format(element) end)
 
                 if values[1] == t then table.remove(values, 1) end
 
                 for i, field in ipairs(fields) do
                     table.insert(conditions, ('%s = ?'):format(field))
-                    if t.__jsonFields[field] then values[i] = json.encode(values[i]) end
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
                 end
 
                 local whereClause = conditions[1]
@@ -245,12 +247,43 @@ local repositoryMeta = {
                     orderClause = ('ORDER BY %s %s'):format(order.name, order.direction)
                 end
 
-                local sql = string.format("SELECT * FROM %s WHERE %s %s LIMIT 1", t.__tableName, whereClause, orderClause)
-                debugMessage(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
+                local sql = string.format("SELECT %s FROM %s WHERE %s %s LIMIT 1", table.concat(selectFields, ', '), t.__tableName, whereClause, orderClause)
+                Logger.trace(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
 
                 local rows = mapper(t, oxmysql:query_async(sql, values))
                 if #rows >= 1 then return rows[1] end
                 return nil
+            end
+        end
+
+        local countByMatch = methodName:match('^countBy(.+)$')
+        if countByMatch then
+            local fields, operators, order = parseFields(t.__fields, countByMatch)
+
+            return function(...)
+                local values = { ... }
+                local conditions = {}
+
+                if values[1] == t then table.remove(values, 1) end
+
+                for i, field in ipairs(fields) do
+                    table.insert(conditions, ('%s = ?'):format(field))
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
+                end
+
+                local whereClause = conditions[1]
+                for i = 2, #conditions do
+                    whereClause = string.format("%s %s %s", whereClause, operators[i - 1], conditions[i])
+                end
+                local orderClause = ''
+                if order then
+                    orderClause = ('ORDER BY %s %s'):format(order.name, order.direction)
+                end
+
+                local sql = string.format("SELECT COUNT(*) as count FROM %s WHERE %s %s LIMIT 1", t.__tableName, whereClause, orderClause)
+                Logger.trace(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
+
+                return oxmysql:scalar_async(sql, values)
             end
         end
 
@@ -261,12 +294,13 @@ local repositoryMeta = {
             return function(...)
                 local values = { ... }
                 local conditions = {}
+                local selectFields = lib.array.map(lib.array.merge(t.__fields, {t.__id}), function (element) return ('`%s`'):format(element) end)
 
                 if values[1] == t then table.remove(values, 1) end
 
                 for i, field in ipairs(fields) do
                     table.insert(conditions, ('%s = ?'):format(field))
-                    if t.__jsonFields[field] then values[i] = json.encode(values[i]) end
+                    if t.__mappers[field] then values[i] = t.__mappers[field].encode(values[i]) end
                 end
 
                 local whereClause = conditions[1]
@@ -278,8 +312,8 @@ local repositoryMeta = {
                     orderClause = ('ORDER BY %s %s'):format(order.name, order.direction)
                 end
 
-                local sql = string.format("SELECT * FROM %s WHERE %s %s", t.__tableName, whereClause, orderClause)
-                debugMessage(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
+                local sql = string.format("SELECT %s FROM %s WHERE %s %s", table.concat(selectFields, ', '), t.__tableName, whereClause, orderClause)
+                Logger.trace(('<%s(...)> Generated SQL: ^4%s^7.'):format(methodName, sql))
 
                 return mapper(t, oxmysql:query_async(sql, values))
             end
@@ -289,12 +323,22 @@ local repositoryMeta = {
     end
 }
 
+---comment
+---@param fieldName string
+---@param mapperFun Encoder
+function baseRepository:registerMapper(fieldName, mapperFun)
+    self.__mappers[fieldName] = mapperFun
+end
+
 function baseRepository:registerJsonField(fieldName)
-    self.__jsonFields[fieldName] = true
+    self.__mappers[fieldName] = {
+        encode = function (_, val) return json.encode(val or '{}') end,
+        decode = function (_, val) return json.decode(val or '{}') end,
+    }
 end
 
 function baseRepository:queueUpdate(obj)
-    debugMessage(('Queued DB Update of %s: %s in 60 seconds...'):format(self.__tableName, obj[self.__id]))
+    Logger.trace(('Queued DB Update of %s: %s in 60 seconds...'):format(self.__tableName, obj[self.__id]))
     if self.__pendingUpdateStatements[obj[self.__id]] then
         self.__pendingUpdateStatements[obj[self.__id]].object = obj
     else
@@ -316,12 +360,11 @@ function baseRepository.create(tableName, idKey, fields)
     obj.__tableName = tableName
     obj.__id = idKey
     obj.__fields = fields
-    obj.__jsonFields = {}
     obj.__pendingUpdateStatements = {}
-    obj.oxmysql = baseRepository.oxmysql
+    obj.__mappers = { }
 
     Citizen.CreateThread(function()
-        debugMessage(('Created UpdateQueue for Repository %s'):format(obj.__tableName))
+        Logger.trace(('Created UpdateQueue for Repository %s'):format(obj.__tableName))
         while true do
             Wait(1000)
             local updateCount = 0

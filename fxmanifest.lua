@@ -5,7 +5,7 @@ lua54 'yes'
 
 name 'oxmysql repository extension'
 author 'Altera Vita RP'
-version '0.1.0'
+version '0.2.0'
 license 'LGPL-3.0-or-later'
 repository 'https://github.com/alteravitarp/oxmysql-repository'
 description 'A Spring Data JPA-like repository extension for oxmysql created by Altera Vita RP'

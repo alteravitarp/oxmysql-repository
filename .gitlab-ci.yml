@@ -1,8 +1,6 @@
 include:
   - project: 'general/ci-templates'
     file: 'workflow.gitlab-ci.yml'
-  - project: 'general/ci-templates'
-    file: 'yarn.gitlab-ci.yml'
   - project: 'fivem/avrp-deployment-client'
     file: 'deployment.gitlab-ci.yml'
 

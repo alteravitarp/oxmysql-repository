@@ -2,6 +2,19 @@
 
 This module provides a [JPA-repository](https://docs.spring.io/spring-data/jpa/reference/index.html) like base for accessing a database table.
 
+## Changelogs
+
+### 0.2.0 - countBy-Methods
+
+You can now get the count from your tables using `countBy{expression}(...)`.
+
+Example:
+```lua
+---@class OwnedVehicleRepository : BaseRepository
+---@field countByPlate fun(r: OwnedVehicleRepository, plate: string): number
+local repository = baseRepository.create('owned_vehicles_v2', 'id', {...})
+```
+
 ## Requirements
 
 - oxmysql
@@ -86,5 +99,6 @@ return repository
 
 ## TODOs
 
-- [ ] Only select fields set in `baseRepository.create(...)`
+- [x] Only select fields set in `baseRepository.create(...)`
 - [ ] Only update modified fields
+- [x] Added `countBy` dynamic methods
